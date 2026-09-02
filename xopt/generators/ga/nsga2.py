@@ -328,7 +328,8 @@ class NSGA2Generator(GAGeneratorBase, StateOwner):
     mutation_operator : PolynomialMutation or DummyMutation, default=PolynomialMutation()
         Operator used to perform mutation on offspring solutions.
     output_dir : str or os.PathLike, optional
-        Directory to save algorithm state and population history.
+        Directory to save algorithm state and population history. The path actually
+        written to, after expansion and collision avoidance, is `output_dir_resolved`.
     checkpoint_freq : int, default=1
         Frequency (in generations) at which to save checkpoints.
     checkpoint_file : str, optional
@@ -358,7 +359,8 @@ class NSGA2Generator(GAGeneratorBase, StateOwner):
     When `output_dir` is set to a path, the populations and all evaluated individuals will be written to the
     files "populations.csv" and "data.csv" respectively. Checkpoints are also saved every `checkpoint_freq` generation
     to a subdirectory. If the `output_dir` already exists at the first time output is created in the generator's lifetime,
-    a number will be appended the output path to avoid overwriting previous data.
+    a number will be appended the output path to avoid overwriting previous data. `output_dir` itself is left as given,
+    with the path in use available from `output_dir_resolved`.
 
     The population file contains all of the populations with an index "xopt_generation" to indicate with which generation
     each row is associated.

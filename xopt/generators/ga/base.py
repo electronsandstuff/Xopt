@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 import logging
 import os
 import pandas as pd
@@ -46,7 +46,27 @@ def _make_instance_logger(name: str, parent_name: str, level: int) -> logging.Lo
     return logger
 
 
-class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
+class _ResolvedOutputDirMixin(BaseModel):
+    """
+    This mixin just adds a validator to strip the parameter `output_dir_resolved` from input.
+    This is saved as a computed field by the  model, but will error on loading from checkpoint
+    due to extra fields being disallows. It has to be a mixin here to get run before the
+    `CheckpointMixin` is fired.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_resolved_output_dir(cls, values):
+        """Discard "output_dir_resolved" so a reloaded generator resolves its own."""
+        if isinstance(values, dict) and "output_dir_resolved" in values:
+            values = dict(values)
+            values.pop("output_dir_resolved")
+        return values
+
+
+class GAGeneratorBase(
+    CheckpointMixin, _ResolvedOutputDirMixin, DeduplicatedGeneratorBase
+):
     """
     Base class for genetic algorithm generators which write output and checkpoints.
 
@@ -61,8 +81,8 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
     ----------
     output_dir : str or os.PathLike, optional
         Directory to save algorithm state and population history, or None to write
-        nothing. Stored as a string, unexpanded; environment variables and "~" are
-        expanded when the path is used. If the directory already contains data, a
+        nothing. Stored as a string and never modified; environment variables and "~"
+        are expanded when the path is used. If the directory already contains data, a
         number is appended to avoid overwriting it.
     checkpoint_freq : int, default=1
         Frequency (in generations) at which checkpoints are saved. Set to -1 to
@@ -72,12 +92,17 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
 
     Attributes
     ----------
-    expanded_output_dir : str or None
-        `output_dir` with environment variables and "~" expanded. All file writes go
-        here.
+    output_dir_resolved : str
+        Expanded, collision free path `output_dir` was resolved to. All file writes go
+        here. Empty until the directory has been created.
     """
 
-    output_dir: str | None = None
+    output_dir: str | None = Field(
+        None,
+        description="Directory to save algorithm state and population history, or None "
+        "to write nothing. Environment variables and a leading '~' are expanded when "
+        "it is used and a number is appended if it already contains data",
+    )
     checkpoint_freq: int = Field(
         1,
         description="How often (in generations) to save checkpoints (set to -1 to disable)",
@@ -85,9 +110,7 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
     log_level: int = Field(
         logging.INFO, description="Log message level output to log.txt"
     )
-    _output_prepared: bool = (
-        False  # Whether the output directory has been resolved and created
-    )
+    _output_dir_resolved: str = ""  # Empty until the output directory has been created
 
     @field_validator("output_dir", mode="before")
     @classmethod
@@ -97,12 +120,11 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
             return os.fspath(value)
         return value
 
+    @computed_field
     @property
-    def expanded_output_dir(self) -> str | None:
-        """Output directory with environment variables and "~" expanded."""
-        if self.output_dir is None:
-            return None
-        return os.path.expanduser(os.path.expandvars(self.output_dir))
+    def output_dir_resolved(self) -> str:
+        """Directory output is written to, empty until it has been created."""
+        return self._output_dir_resolved
 
     def model_post_init(self, context):
         # Get a unique logger owned by this instance.
@@ -116,39 +138,36 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
         """
         Resolve and create the output directory and begin logging to file.
 
-        Repeated calls do nothing. If the requested directory already holds data, a
-        number is appended and `output_dir` is updated to the path actually used.
+        Repeated calls do nothing. The requested path is expanded and, if it already
+        holds data, a number is appended. The result is kept in `output_dir_resolved`.
         """
-        if (self.output_dir is None) or self._output_prepared:
+        if (self.output_dir is None) or self._output_dir_resolved:
             return
 
-        # Check if directory exists and do collision avoidance. Resolve into a local
-        # so the field is only assigned once, since assignment revalidates the model.
-        # Suffixes are applied to the unexpanded path, but tested against the expanded
-        # one. The path is normalized first so that a trailing separator does not put
+        # Check if directory exists and do collision avoidance. Suffixes are applied to
+        # the expanded path so that they cannot land inside an environment variable or
+        # "~". The path is normalized first so that a trailing separator does not put
         # the suffixed directory inside the one being protected.
-        requested = self.output_dir
-        suffix_base = os.path.normpath(requested)
+        requested = os.path.normpath(
+            os.path.expanduser(os.path.expandvars(self.output_dir))
+        )
+        resolved = requested
         counter = 2
-        output_dir = requested
-        expanded = self.expanded_output_dir
-        while os.path.exists(expanded) and os.listdir(expanded):
-            output_dir = f"{suffix_base}_{counter}"
-            expanded = os.path.expanduser(os.path.expandvars(output_dir))
+        while os.path.exists(resolved) and os.listdir(resolved):
+            resolved = f"{requested}_{counter}"
             counter += 1
-        if output_dir != requested:
+        if resolved != requested:
             self._logger.info(
                 f'detected existing output_dir "{requested}" and corrected '
-                f'to "{output_dir}" to avoid overwriting'
+                f'to "{resolved}" to avoid overwriting'
             )
-        self.output_dir = output_dir
 
         # We are now setup
-        os.makedirs(self.expanded_output_dir, exist_ok=True)
-        self._output_prepared = True
+        os.makedirs(resolved, exist_ok=True)
+        self._output_dir_resolved = resolved
 
         # Set up file logging
-        log_file_path = os.path.join(self.expanded_output_dir, "log.txt")
+        log_file_path = os.path.join(resolved, "log.txt")
         file_handler = logging.FileHandler(log_file_path, mode="w")
         file_handler.setLevel(self.log_level)
         file_handler.setFormatter(
@@ -160,7 +179,7 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
         # Record the problem definition alongside the data
         # Note: this is necessary to include in output for users running analysis on the results
         # ie to plot Pareto front, you need to know the names and direction of the objectives
-        with open(os.path.join(self.expanded_output_dir, "vocs.txt"), "w") as f:
+        with open(os.path.join(resolved, "vocs.txt"), "w") as f:
             f.write(self.vocs.model_dump_json())
 
     def end_generation(self, generation_index: int, population: list[dict]) -> None:
@@ -175,9 +194,9 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
             The individuals making up the completed population.
         """
         self._prepare_output()
-        if self.output_dir is None:
+        if not self._output_dir_resolved:
             return
-        output_dir = self.expanded_output_dir
+        output_dir = self._output_dir_resolved
         save_start_t = time.perf_counter()
 
         # Save all Xopt data

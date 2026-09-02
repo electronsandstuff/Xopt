@@ -130,9 +130,9 @@ def test_environment_variables_are_expanded_but_not_stored(tmp_path, monkeypatch
     requested = os.path.join("$XOPT_TEST_OUTPUT_ROOT", "run")
     generator = make_generator(requested)
 
-    assert generator.expanded_output_dir == str(tmp_path / "run")
-
     run_generation(generator, 1, n_data=4)
+
+    assert generator.output_dir_resolved == str(tmp_path / "run")
 
     # Storing the unexpanded string is what lets a checkpoint resolve against the
     # environment of whatever machine it is reloaded on
@@ -148,11 +148,10 @@ def test_home_directory_is_expanded_but_not_stored(tmp_path, monkeypatch):
     requested = os.path.join("~", "run")
     generator = make_generator(requested)
 
-    assert generator.expanded_output_dir == str(tmp_path / "run")
-
     generator._prepare_output()
 
     assert generator.output_dir == requested
+    assert generator.output_dir_resolved == str(tmp_path / "run")
     assert os.path.isdir(tmp_path / "run")
     generator.close_log_file()
 
@@ -162,7 +161,7 @@ def test_vocs_is_written_alongside_the_data(tmp_path):
     generator = make_generator(tmp_path / "run")
     generator._prepare_output()
 
-    with open(os.path.join(generator.output_dir, "vocs.txt")) as f:
+    with open(os.path.join(generator.output_dir_resolved, "vocs.txt")) as f:
         written = VOCS(**json.load(f))
 
     assert written == tnk_vocs
@@ -175,10 +174,11 @@ def test_prepare_output_creates_directory_and_is_idempotent(tmp_path):
 
     generator._prepare_output()
     assert generator.output_dir == str(requested)
+    assert generator.output_dir_resolved == str(requested)
     assert os.path.isdir(requested)
 
     generator._prepare_output()
-    assert generator.output_dir == str(requested)
+    assert generator.output_dir_resolved == str(requested)
     generator.close_log_file()
 
 
@@ -192,6 +192,7 @@ def test_existing_empty_directory_is_not_renamed(tmp_path, module_logger):
     generator._prepare_output()
 
     assert generator.output_dir == str(requested)
+    assert generator.output_dir_resolved == str(requested)
     assert not any("corrected" in m for m in module_logger.messages)
     generator.close_log_file()
 
@@ -203,7 +204,8 @@ def test_non_empty_directory_is_renamed(tmp_path, module_logger):
 
     first = make_generator(requested)
     first._prepare_output()
-    assert first.output_dir == f"{requested}_2"
+    assert first.output_dir == str(requested)
+    assert first.output_dir_resolved == f"{requested}_2"
     assert os.path.isdir(f"{requested}_2")
     assert any("corrected" in m for m in module_logger.messages)
 
@@ -215,7 +217,7 @@ def test_non_empty_directory_is_renamed(tmp_path, module_logger):
     (tmp_path / "run_2" / "data.csv").write_text("existing\n")
     second = make_generator(requested)
     second._prepare_output()
-    assert second.output_dir == f"{requested}_3"
+    assert second.output_dir_resolved == f"{requested}_3"
     second.close_log_file()
 
 
@@ -227,7 +229,7 @@ def test_trailing_separator_suffix_lands_beside_the_directory(tmp_path):
     generator = make_generator(f"{requested}{os.sep}")
     generator._prepare_output()
 
-    assert generator.output_dir == f"{requested}_2"
+    assert generator.output_dir_resolved == f"{requested}_2"
     assert os.path.isdir(f"{requested}_2")
     assert not os.path.exists(requested / "_2")
     assert (requested / "data.csv").read_text() == "existing\n"
@@ -240,6 +242,7 @@ def test_trailing_separator_is_left_alone_without_a_collision(tmp_path):
     generator._prepare_output()
 
     assert generator.output_dir == requested
+    assert generator.output_dir_resolved == str(tmp_path / "run")
     assert os.path.isdir(tmp_path / "run")
     generator.close_log_file()
 
@@ -248,9 +251,11 @@ def test_end_generation_writes_both_files(tmp_path):
     generator = make_generator(tmp_path / "run")
     run_generation(generator, 1, n_data=8)
 
-    assert len(pd.read_csv(os.path.join(generator.output_dir, "data.csv"))) == 8
+    assert (
+        len(pd.read_csv(os.path.join(generator.output_dir_resolved, "data.csv"))) == 8
+    )
 
-    pop_df = pd.read_csv(os.path.join(generator.output_dir, "populations.csv"))
+    pop_df = pd.read_csv(os.path.join(generator.output_dir_resolved, "populations.csv"))
     assert len(pop_df) == 4
     assert (pop_df["xopt_generation"] == 1).all()
     assert list(pop_df.columns) == tnk_vocs.all_names + [
@@ -268,10 +273,12 @@ def test_data_overwritten_while_populations_accumulate(tmp_path):
     run_generation(generator, 2, n_data=8)
 
     # data.csv is a full overwrite, so it reflects only the latest generation
-    assert len(pd.read_csv(os.path.join(generator.output_dir, "data.csv"))) == 8
+    assert (
+        len(pd.read_csv(os.path.join(generator.output_dir_resolved, "data.csv"))) == 8
+    )
 
     # populations.csv is appended and carries exactly one header line
-    population_path = os.path.join(generator.output_dir, "populations.csv")
+    population_path = os.path.join(generator.output_dir_resolved, "populations.csv")
     pop_df = pd.read_csv(population_path)
     assert len(pop_df) == 8
     assert sorted(pop_df["xopt_generation"].unique()) == [1, 2]
@@ -294,7 +301,7 @@ def test_end_generation_normalizes_changing_schema(tmp_path):
         del individual["xopt_runtime"]
     generator.end_generation(3, sparse)
 
-    pop_df = pd.read_csv(os.path.join(generator.output_dir, "populations.csv"))
+    pop_df = pd.read_csv(os.path.join(generator.output_dir_resolved, "populations.csv"))
     assert len(pop_df) == 12
     assert "obs1" not in pop_df.columns
     assert pop_df[pop_df["xopt_generation"] == 3]["xopt_runtime"].isna().all()
@@ -308,7 +315,7 @@ def test_checkpoint_frequency(tmp_path, checkpoint_freq, expected):
     for index in range(1, 5):
         run_generation(generator, index)
 
-    checkpoint_dir = os.path.join(generator.output_dir, "checkpoints")
+    checkpoint_dir = os.path.join(generator.output_dir_resolved, "checkpoints")
     written = len(os.listdir(checkpoint_dir)) if os.path.isdir(checkpoint_dir) else 0
     assert written == expected
     generator.close_log_file()
@@ -332,7 +339,7 @@ def test_log_file_receives_records_and_closes(tmp_path, module_logger):
     assert "after prepare" in module_logger.messages
     generator.close_log_file()
 
-    with open(os.path.join(generator.output_dir, "log.txt")) as f:
+    with open(os.path.join(generator.output_dir_resolved, "log.txt")) as f:
         assert "after prepare" in f.read()
     assert not generator._logger.handlers
 
@@ -365,9 +372,9 @@ def test_log_files_are_not_shared_between_generators(tmp_path):
     first.close_log_file()
     second.close_log_file()
 
-    with open(os.path.join(first.output_dir, "log.txt")) as f:
+    with open(os.path.join(first.output_dir_resolved, "log.txt")) as f:
         first_log = f.read()
-    with open(os.path.join(second.output_dir, "log.txt")) as f:
+    with open(os.path.join(second.output_dir_resolved, "log.txt")) as f:
         second_log = f.read()
 
     assert "from the first generator" in first_log
