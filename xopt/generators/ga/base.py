@@ -124,13 +124,16 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
 
         # Check if directory exists and do collision avoidance. Resolve into a local
         # so the field is only assigned once, since assignment revalidates the model.
-        # Suffixes are applied to the unexpanded path, but tested against the expanded one.
+        # Suffixes are applied to the unexpanded path, but tested against the expanded
+        # one. The path is normalized first so that a trailing separator does not put
+        # the suffixed directory inside the one being protected.
         requested = self.output_dir
+        suffix_base = os.path.normpath(requested)
         counter = 2
         output_dir = requested
         expanded = self.expanded_output_dir
         while os.path.exists(expanded) and os.listdir(expanded):
-            output_dir = f"{requested}_{counter}"
+            output_dir = f"{suffix_base}_{counter}"
             expanded = os.path.expanduser(os.path.expandvars(output_dir))
             counter += 1
         if output_dir != requested:

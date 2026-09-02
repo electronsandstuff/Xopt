@@ -152,6 +152,31 @@ def test_non_empty_directory_is_renamed(tmp_path, module_logger):
     second.close_log_file()
 
 
+def test_trailing_separator_suffix_lands_beside_the_directory(tmp_path):
+    requested = tmp_path / "run"
+    os.makedirs(requested)
+    (requested / "data.csv").write_text("existing\n")
+
+    generator = make_generator(f"{requested}{os.sep}")
+    generator._prepare_output()
+
+    assert generator.output_dir == f"{requested}_2"
+    assert os.path.isdir(f"{requested}_2")
+    assert not os.path.exists(requested / "_2")
+    assert (requested / "data.csv").read_text() == "existing\n"
+    generator.close_log_file()
+
+
+def test_trailing_separator_is_left_alone_without_a_collision(tmp_path):
+    requested = f"{tmp_path / 'run'}{os.sep}"
+    generator = make_generator(requested)
+    generator._prepare_output()
+
+    assert generator.output_dir == requested
+    assert os.path.isdir(tmp_path / "run")
+    generator.close_log_file()
+
+
 def test_end_generation_writes_both_files(tmp_path):
     generator = make_generator(tmp_path / "run")
     run_generation(generator, 1, n_data=8)
