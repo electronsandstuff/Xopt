@@ -243,3 +243,42 @@ def test_log_file_receives_records_and_closes(tmp_path, module_logger):
     with open(os.path.join(generator.output_dir, "log.txt")) as f:
         assert "after prepare" in f.read()
     assert not generator._logger.handlers
+
+
+def test_loggers_are_not_registered_globally(tmp_path):
+    # Naming a logger after id(self) leaks it into the global registry and collides
+    # once ids are recycled, so later generators inherit earlier ones' file handlers.
+    registered_before = set(logging.Logger.manager.loggerDict)
+
+    # Held in a list so that no id can be recycled part way through
+    generators = [make_generator(tmp_path / f"run_{index}") for index in range(20)]
+
+    assert len({id(generator._logger) for generator in generators}) == 20
+    assert set(logging.Logger.manager.loggerDict) - registered_before <= {
+        OutputTestGenerator.__module__
+    }
+
+
+def test_log_files_are_not_shared_between_generators(tmp_path):
+    first = make_generator(tmp_path / "first")
+    second = make_generator(tmp_path / "second")
+    first._prepare_output()
+    second._prepare_output()
+
+    assert len(first._logger.handlers) == 1
+    assert len(second._logger.handlers) == 1
+
+    first._logger.info("from the first generator")
+    second._logger.info("from the second generator")
+    first.close_log_file()
+    second.close_log_file()
+
+    with open(os.path.join(first.output_dir, "log.txt")) as f:
+        first_log = f.read()
+    with open(os.path.join(second.output_dir, "log.txt")) as f:
+        second_log = f.read()
+
+    assert "from the first generator" in first_log
+    assert "from the second generator" not in first_log
+    assert "from the second generator" in second_log
+    assert "from the first generator" not in second_log

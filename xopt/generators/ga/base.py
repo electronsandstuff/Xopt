@@ -15,6 +15,37 @@ POPULATION_METADATA_COLUMNS = [
 ]
 
 
+class _InstanceLogger(logging.Logger):
+    """
+    Logger owned by a single object. Used for per-object logging in generator.
+    """
+
+    def __reduce__(self):
+        return _make_instance_logger, (self.name, self.parent.name, self.level)
+
+
+def _make_instance_logger(name: str, parent_name: str, level: int) -> logging.Logger:
+    """
+    Build an unregistered logger which propagates to an existing named logger.
+
+    Parameters
+    ----------
+    name : str
+        Name recorded on emitted records.
+    parent_name : str
+        Name of the logger records propagate to.
+    level : int
+        Level of the new logger.
+
+    Returns
+    -------
+    logging.Logger
+    """
+    logger = _InstanceLogger(name, level)
+    logger.parent = logging.getLogger(parent_name)
+    return logger
+
+
 class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
     """
     Base class for genetic algorithm generators which write output and checkpoints.
@@ -24,7 +55,7 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
     completed and everything else is taken care of.
 
     Nothing is written to disk until the generator is used, so building or
-    deserializing one never touches the filesystem.
+    deserializing one never touches the filesystem. Each generator owns its logger.
 
     Parameters
     ----------
@@ -74,12 +105,12 @@ class GAGeneratorBase(CheckpointMixin, DeduplicatedGeneratorBase):
         return os.path.expanduser(os.path.expandvars(self.output_dir))
 
     def model_post_init(self, context):
-        # Get a unique logger per object. Naming it after the concrete class keeps
-        # records propagating through that class's module logger.
-        self._logger = logging.getLogger(
-            f"{type(self).__module__}.{type(self).__name__}.{id(self)}"
+        # Get a unique logger owned by this instance.
+        self._logger = _make_instance_logger(
+            f"{type(self).__module__}.{type(self).__name__}",
+            type(self).__module__,
+            self.log_level,
         )
-        self._logger.setLevel(self.log_level)
 
     def _prepare_output(self) -> None:
         """
