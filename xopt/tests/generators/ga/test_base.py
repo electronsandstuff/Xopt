@@ -247,6 +247,97 @@ def test_trailing_separator_is_left_alone_without_a_collision(tmp_path):
     generator.close_log_file()
 
 
+def test_environment_variable_collision_suffixes_the_expanded_path(
+    tmp_path, monkeypatch
+):
+    # Suffixing the unexpanded string would give "$XOPT_TEST_OUTPUT_ROOT_2", a different
+    # and unset variable, leaving a literal directory of that name in the cwd
+    root = tmp_path / "root"
+    os.makedirs(root)
+    (root / "data.csv").write_text("existing\n")
+    monkeypatch.setenv("XOPT_TEST_OUTPUT_ROOT", str(root))
+    monkeypatch.chdir(tmp_path)
+
+    generator = make_generator("$XOPT_TEST_OUTPUT_ROOT")
+    generator._prepare_output()
+
+    assert generator.output_dir == "$XOPT_TEST_OUTPUT_ROOT"
+    assert generator.output_dir_resolved == f"{root}_2"
+    assert os.path.isdir(f"{root}_2")
+    assert (root / "data.csv").read_text() == "existing\n"
+
+    # Nothing named after the variable itself was created
+    assert not os.path.exists(tmp_path / "$XOPT_TEST_OUTPUT_ROOT_2")
+    generator.close_log_file()
+
+
+def test_home_directory_collision_suffixes_the_expanded_path(tmp_path, monkeypatch):
+    # Likewise "~" must not become a literal "~_2" directory
+    home = tmp_path / "home"
+    os.makedirs(home)
+    (home / "data.csv").write_text("existing\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    generator = make_generator("~")
+    generator._prepare_output()
+
+    assert generator.output_dir == "~"
+    assert generator.output_dir_resolved == f"{home}_2"
+    assert os.path.isdir(f"{home}_2")
+    assert not os.path.exists(tmp_path / "~_2")
+    generator.close_log_file()
+
+
+def test_resolved_directory_is_reported_but_never_an_input(tmp_path):
+    # The generator writes it rather than being given it, so a reloaded generator must
+    # resolve one of its own instead of appending to the earlier run
+    requested = tmp_path / "run"
+    generator = make_generator(requested)
+
+    assert generator.output_dir_resolved == ""
+    assert json.loads(generator.to_json())["output_dir_resolved"] == ""
+
+    generator._prepare_output()
+    dumped = json.loads(generator.to_json())
+    assert dumped["output_dir_resolved"] == str(requested)
+
+    reloaded = OutputTestGenerator.model_validate(dumped)
+    assert reloaded.output_dir == str(requested)
+    assert reloaded.output_dir_resolved == ""
+
+    reloaded._prepare_output()
+    assert reloaded.output_dir_resolved == f"{requested}_2"
+    generator.close_log_file()
+    reloaded.close_log_file()
+
+
+def test_checkpoint_resume_resolves_a_fresh_directory(tmp_path):
+    requested = tmp_path / "run"
+    generator = make_generator(requested)
+    run_generation(generator, 1)
+    generator.close_log_file()
+
+    checkpoint_dir = os.path.join(generator.output_dir_resolved, "checkpoints")
+    checkpoint_file = os.path.join(checkpoint_dir, os.listdir(checkpoint_dir)[0])
+
+    restored = OutputTestGenerator(checkpoint_file=checkpoint_file)
+    assert restored.output_dir == str(requested)
+    assert restored.output_dir_resolved == ""
+
+    restored._prepare_output()
+    assert restored.output_dir_resolved == f"{requested}_2"
+    restored.close_log_file()
+
+    # A directory given alongside the checkpoint still wins
+    override = OutputTestGenerator(
+        checkpoint_file=checkpoint_file, output_dir=tmp_path / "other"
+    )
+    assert override.output_dir == str(tmp_path / "other")
+    assert override.output_dir_resolved == ""
+
+
 def test_end_generation_writes_both_files(tmp_path):
     generator = make_generator(tmp_path / "run")
     run_generation(generator, 1, n_data=8)
