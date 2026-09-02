@@ -7,6 +7,7 @@ import pytest
 
 from xopt.generators.ga.base import GAGeneratorBase
 from xopt.resources.test_functions.tnk import tnk_vocs
+from xopt.vocs import VOCS
 
 
 class OutputTestGenerator(GAGeneratorBase):
@@ -19,6 +20,16 @@ class OutputTestGenerator(GAGeneratorBase):
 
     def _generate(self, n_candidates: int) -> list[dict]:
         return []
+
+
+class FsPath:
+    """Minimal os.PathLike which is not a pathlib.Path."""
+
+    def __init__(self, path):
+        self.path = str(path)
+
+    def __fspath__(self):
+        return self.path
 
 
 class RecordingHandler(logging.Handler):
@@ -46,7 +57,7 @@ def module_logger():
 def make_generator(output_dir, **kwargs):
     return OutputTestGenerator(
         vocs=tnk_vocs,
-        output_dir=None if output_dir is None else str(output_dir),
+        output_dir=output_dir,
         log_level=logging.DEBUG,
         **kwargs,
     )
@@ -100,6 +111,62 @@ def test_construction_touches_nothing(tmp_path):
 
     assert generator.output_dir == str(requested)
     assert os.listdir(tmp_path) == []
+
+
+def test_pathlike_output_dir_is_stored_as_a_string(tmp_path):
+    requested = tmp_path / "run"
+
+    for value in (requested, FsPath(requested), str(requested)):
+        generator = make_generator(value)
+        assert isinstance(generator.output_dir, str)
+        assert generator.output_dir == str(requested)
+
+        # A path object must not survive into the serialized form
+        assert json.loads(generator.to_json())["output_dir"] == str(requested)
+
+
+def test_environment_variables_are_expanded_but_not_stored(tmp_path, monkeypatch):
+    monkeypatch.setenv("XOPT_TEST_OUTPUT_ROOT", str(tmp_path))
+    requested = os.path.join("$XOPT_TEST_OUTPUT_ROOT", "run")
+    generator = make_generator(requested)
+
+    assert generator.expanded_output_dir == str(tmp_path / "run")
+
+    run_generation(generator, 1, n_data=4)
+
+    # Storing the unexpanded string is what lets a checkpoint resolve against the
+    # environment of whatever machine it is reloaded on
+    assert generator.output_dir == requested
+    assert json.loads(generator.to_json())["output_dir"] == requested
+    assert os.path.isfile(tmp_path / "run" / "data.csv")
+    generator.close_log_file()
+
+
+def test_home_directory_is_expanded_but_not_stored(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    requested = os.path.join("~", "run")
+    generator = make_generator(requested)
+
+    assert generator.expanded_output_dir == str(tmp_path / "run")
+
+    generator._prepare_output()
+
+    assert generator.output_dir == requested
+    assert os.path.isdir(tmp_path / "run")
+    generator.close_log_file()
+
+
+def test_vocs_is_written_alongside_the_data(tmp_path):
+    # Analysis of the output needs the objective names and directions
+    generator = make_generator(tmp_path / "run")
+    generator._prepare_output()
+
+    with open(os.path.join(generator.output_dir, "vocs.txt")) as f:
+        written = VOCS(**json.load(f))
+
+    assert written == tnk_vocs
+    generator.close_log_file()
 
 
 def test_prepare_output_creates_directory_and_is_idempotent(tmp_path):
